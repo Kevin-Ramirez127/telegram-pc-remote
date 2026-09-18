@@ -1,0 +1,13 @@
+# Secrets and local state
+.env
+*.env
+!.env.example
+
+# Runtime artifacts
+/bin/
+/dist/
+*.log
+
+# Backups made by manage_commands.sh
+data/*
+commands/
