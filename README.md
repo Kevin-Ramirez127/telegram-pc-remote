@@ -1,6 +1,6 @@
 # telegram-pc-remote
 
-A Telegram bot that remote-controls your PC through **pre-approved action
+A Telegram bot that remote-controls your PC through **pre-defined action
 buttons**. You define a set of commands — each backed by a **shell script**
 that you author in the `commands/` folder. When a whitelisted user presses a
 button — or types its exact label — the bot runs the registered script and
