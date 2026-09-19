@@ -212,3 +212,35 @@ func TestImageRejectsOversize(t *testing.T) {
 		t.Fatalf("oversized image must be rejected, got %v", err)
 	}
 }
+
+func TestMenuOptionValuePassedToHandler(t *testing.T) {
+	cmd, opts := setupScript(t, "echo \"arg=$1 option=${TPR_OPTION} label=${TPR_OPTION_LABEL}\"")
+	out, err := Execute(context.Background(), cmd, ExecuteOpts{
+		ScriptPath:  opts.ScriptPath,
+		WorkDir:     opts.WorkDir,
+		Option:      "3",
+		OptionLabel: "Workspace 3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Text != "arg=3 option=3 label=Workspace 3" {
+		t.Fatalf("option value must reach the handler as $1/TPR_OPTION/TPR_OPTION_LABEL, got %q", out.Text)
+	}
+}
+
+func TestMenuOptionUsesItsOwnScript(t *testing.T) {
+	cmd, opts := setupScript(t, "echo \"own-script option=$1\"")
+	out, err := Execute(context.Background(), cmd, ExecuteOpts{
+		ScriptPath:  opts.ScriptPath,
+		WorkDir:     opts.WorkDir,
+		Option:      "custom",
+		OptionLabel: "Custom",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Text != "own-script option=custom" {
+		t.Fatalf("own option script should receive the value too, got %q", out.Text)
+	}
+}

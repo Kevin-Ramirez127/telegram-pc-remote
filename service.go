@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,32 @@ import (
 	"telegram-pc-remote/internal/store"
 	"telegram-pc-remote/internal/whitelist"
 )
+
+// optionData is the callback payload of a menu option button. It is built as
+// "m\x1f<menu-id>\x1f<index>" using the unit separator (0x1f) as the field
+// delimiter — command texts / menu ids / labels cannot contain control
+// characters, so parsing is unambiguous, and menu ids keep it well under
+// Telegram's 64-byte callback_data limit.
+const (
+	optionDataPrefix = "m\x1f"
+	optionDataSep    = "\x1f"
+)
+
+func encodeOptionData(menuID string, idx int) string {
+	return optionDataPrefix + menuID + optionDataSep + strconv.Itoa(idx)
+}
+
+func parseOptionData(data string) (menuID string, idx int, ok bool) {
+	parts := strings.SplitN(data, optionDataSep, 3)
+	if len(parts) != 3 || parts[0] != "m" {
+		return "", 0, false
+	}
+	idx, err := strconv.Atoi(parts[2])
+	if err != nil || idx < 0 {
+		return "", 0, false
+	}
+	return parts[1], idx, true
+}
 
 type service struct {
 	bot       *tgbotapi.BotAPI
@@ -106,7 +133,12 @@ func (s *service) process(upd tgbotapi.Update) {
 	}
 
 	if isCallback {
-		// A button press: the button text must match a stored command.
+		if strings.HasPrefix(text, optionDataPrefix) {
+			// A menu option button was pressed.
+			s.runMenuOption(chatID, text)
+			return
+		}
+		// A main menu button: the button text must match a stored command.
 		s.runCommand(text, chatID)
 		return
 	}
@@ -119,12 +151,17 @@ func (s *service) process(upd tgbotapi.Update) {
 
 // runCommand looks up exact text among the stored commands. If there is no
 // match, it sends an error message (the caller never has other command names).
-// If there is a match, it executes the registered script and reports the
-// result (which may be a photo for --img commands).
+// Script commands are executed and their result reported (which may be a
+// photo for --img commands); menu commands show their option buttons.
 func (s *service) runCommand(text string, chatID int64) {
 	cmd, ok := s.store.Lookup(text)
 	if !ok {
 		s.send(chatID, fmt.Sprintf("⚠️ Unknown command: %q. Send /menu to see the available buttons.", text))
+		return
+	}
+
+	if cmd.Menu != nil {
+		s.showMenuOptions(chatID, cmd)
 		return
 	}
 
@@ -142,6 +179,94 @@ func (s *service) runCommand(text string, chatID int64) {
 		WorkDir:    s.cfg.CommandsDir,
 	})
 	s.sendResult(chatID, cmd, res, err)
+}
+
+// showMenuOptions answers a menu command with its prompt and one button per
+// option. Each button's callback encodes the menu id + option index.
+func (s *service) showMenuOptions(chatID int64, cmd store.Command) {
+	if len(cmd.Menu.Options) == 0 {
+		s.send(chatID, fmt.Sprintf("⚠️ Menu %q has no options yet (add them with scripts/manage_commands.sh addopt).", cmd.Text))
+		return
+	}
+	prompt := cmd.Menu.Prompt
+	if prompt == "" {
+		prompt = "Select an option:"
+	}
+	prompt = actions.ExpandEscapes(prompt)
+
+	msg := tgbotapi.NewMessage(chatID, prompt)
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(optionRows(cmd.Menu, cmd.Text)...)
+	if _, err := s.bot.Send(msg); err != nil {
+		log.Printf("failed to send menu options to chat %d: %v", chatID, err)
+	}
+}
+
+// optionRows lays out a menu's options as up to store.MaxButtonsPerRow
+// buttons per keyboard row.
+func optionRows(m *store.Menu, text string) [][]tgbotapi.InlineKeyboardButton {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, (len(m.Options)+store.MaxButtonsPerRow-1)/store.MaxButtonsPerRow)
+	for i := 0; i < len(m.Options); i += store.MaxButtonsPerRow {
+		end := i + store.MaxButtonsPerRow
+		if end > len(m.Options) {
+			end = len(m.Options)
+		}
+		row := make([]tgbotapi.InlineKeyboardButton, 0, end-i)
+		for j := i; j < end; j++ {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(m.Options[j].Label, encodeOptionData(m.ID, j)))
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// runMenuOption handles a pressed option button: it resolves the option to a
+// script (its own, or the menu's shared handler) and runs it, passing the
+// option's value as $1 / TPR_OPTION so one handler can branch on the choice.
+func (s *service) runMenuOption(chatID int64, data string) {
+	menuID, idx, ok := parseOptionData(data)
+	if !ok {
+		s.staleButton(chatID)
+		return
+	}
+	cmd, ok := s.store.LookupMenu(menuID)
+	if !ok || cmd.Menu == nil || idx >= len(cmd.Menu.Options) {
+		s.staleButton(chatID)
+		return
+	}
+
+	opt := cmd.Menu.Options[idx]
+	scriptRel := opt.Script
+	value := opt.Value
+	if value == "" {
+		value = opt.Label
+	}
+	if scriptRel == "" {
+		// Fall back to the menu's shared handler, which receives the value.
+		scriptRel = cmd.Menu.Script // guaranteed non-empty by store validation
+	}
+
+	scriptPath, err := s.store.ResolveScriptPath(scriptRel)
+	if err != nil {
+		s.send(chatID, fmt.Sprintf("❌ Option %q is misconfigured: %v", opt.Label, err))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.MaxCommandDuration)
+	defer cancel()
+
+	res, err := actions.Execute(ctx, cmd, actions.ExecuteOpts{
+		ScriptPath:  scriptPath,
+		WorkDir:     s.cfg.CommandsDir,
+		Option:      value,
+		OptionLabel: opt.Label,
+	})
+	msg := cmd
+	msg.Text = opt.Label // report failures against the pressed option
+	s.sendResult(chatID, msg, res, err)
+}
+
+func (s *service) staleButton(chatID int64) {
+	s.send(chatID, "⚠️ This button is outdated. Send /menu to refresh.")
 }
 
 func (s *service) sendResult(chatID int64, cmd store.Command, res actions.Result, err error) {

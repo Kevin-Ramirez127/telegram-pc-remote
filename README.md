@@ -20,6 +20,7 @@ Backend: **Go**. Command management: **bash** (`scripts/manage_commands.sh`).
 | Commands are user-authored `.sh` files in `commands/`, executed with `sh` | `internal/actions` |
 | Output can be wrapped in a response template (`${output}`, `\n`, `\t`) | `internal/actions` / `internal/store` |
 | Image commands: `--img` makes the printed path the photo (template = caption) | `internal/actions` |
+| Menu commands: a button that answers with option buttons; each option calls its own script or hands its value to one shared handler (`$1` / `TPR_OPTION`) | `service.go` / `internal/actions` |
 | User **and** chat allowlist (both must match) | `internal/whitelist` |
 | Rate limiting: at most 1 message per chat per second; extras are ignored | `internal/ratelimit` |
 | Add / list / edit / delete commands from a shell script | `scripts/manage_commands.sh` |
@@ -102,27 +103,92 @@ The image path is validated before sending: it must be a regular file, stay
 under the 9 MiB cap, and its magic bytes must identify a PNG/JPEG/GIF/WebP/BMP
 — arbitrary binaries are never sent to the chat.
 
+### Menu commands (a button that answers with options)
+
+A **menu command** is a button that, when pressed (or when its text is
+typed), replies with a **prompt plus option buttons**. You create the options
+yourself; pressing one either
+
+- runs that option's **own script**, or — when it has none — runs the menu's
+  **shared handler script**, which receives the option as a variable
+  (`$1` and `TPR_OPTION`; the button label as `TPR_OPTION_LABEL`), so a
+  single script can branch on the choice — that's up to you when you write it.
+
+```bash
+# 1. create the menu button (a handler script is optional here)
+scripts/manage_commands.sh addmenu "Change Workspace" --prompt "Select Workspace:" \
+  --script workspace.sh --timeout 15
+
+# 2. add option buttons 1..5 (each falls back to workspace.sh)
+for i in 1 2 3 4 5; do
+  scripts/manage_commands.sh addopt "Change Workspace" --label "$i"
+done
+
+# an option can instead call its own script (overrides the handler)
+scripts/manage_commands.sh addopt "Change Workspace" --label "Custom" --value 9 --script status.sh
+
+scripts/manage_commands.sh opts "Change Workspace"        # list options
+scripts/manage_commands.sh delopt "Change Workspace" --label 5
+```
+
+`commands/workspace.sh` is a shared handler example: it reads the pressed
+value from `$1` / `TPR_OPTION` (replace the `echo` with `wmctrl -s "$1"`,
+`i3-msg workspace`, etc. for real desktop switching).
+
+```json
+{
+  "text": "Change Workspace",
+  "menu": {
+    "id": "change-workspace",
+    "prompt": "Select Workspace:",
+    "script": "workspace.sh",
+    "options": [
+      { "label": "1" },
+      { "label": "Custom", "value": "9", "script": "status.sh" }
+    ]
+  },
+  "timeout_sec": 15
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `menu.id` | short stable handle used in the option buttons' callback data (auto-generated; `--menu-id` to override) |
+| `menu.prompt` | text above the option buttons (`\n`/`\t` expand) — default "Select an option:" |
+| `menu.script` | shared handler; runs for options that have no script of their own |
+| `options[].label` | button text, also the value passed on press (unless `value` is set) |
+| `options[].value` | optional value passed to the handler instead of the label |
+| `options[].script` | optional per-option script (overrides the shared handler) |
+
 ### Management script
 
 ```bash
-# add
+# add a plain script command
 ./scripts/manage_commands.sh add "Lock PC" --script lock.sh --timeout 10
 ./scripts/manage_commands.sh add "Uptime"  --script status.sh
 ./scripts/manage_commands.sh add "Screenshot" --script screenshot.sh --img --template '📸 Shot'
 
+# add a menu command (button that answers with option buttons)
+./scripts/manage_commands.sh addmenu "Change Workspace" --prompt "Select Workspace:" --script workspace.sh
+for i in 1 2 3 4 5; do ./scripts/manage_commands.sh addopt "Change Workspace" --label "$i"; done
+./scripts/manage_commands.sh addopt "Change Workspace" --label "Custom" --value 9 --script status.sh
+
 # list
 ./scripts/manage_commands.sh list
 ./scripts/manage_commands.sh list --json
+./scripts/manage_commands.sh opts "Change Workspace"          # a menu's options
+./scripts/manage_commands.sh delopt "Change Workspace" --label 5
 
 # edit (change any subset; --img/--no-img flip the flag, --timeout 0 resets)
 ./scripts/manage_commands.sh edit "Lock PC" --rename "Lock Screen" --timeout 20
 ./scripts/manage_commands.sh edit "Uptime" --script uptime.sh --template 'Uptime: ${output}'
+./scripts/manage_commands.sh edit "Change Workspace" --menu-prompt "Pick a desktop:"
 
 # delete
 ./scripts/manage_commands.sh delete "Hello"
 ```
 
-**Schema of one command** (`data/commands.json`, version 2):
+**Schema of one command** (`data/commands.json`, version 2) — plain:
 
 ```json
 {
@@ -134,11 +200,27 @@ under the 9 MiB cap, and its magic bytes must identify a PNG/JPEG/GIF/WebP/BMP
 }
 ```
 
+or a menu:
+
+```json
+{
+  "text": "Change Workspace",
+  "menu": {
+    "id": "change-workspace",
+    "prompt": "Select Workspace:",
+    "script": "workspace.sh",
+    "options": [ { "label": "1" } ]
+  },
+  "timeout_sec": 15
+}
+```
+
 | Field | Meaning |
 |---|---|
 | `text` | button label AND exact text to match (1–64 chars) |
-| `script` | `.sh` file to run, relative to the commands directory |
-| `template` | optional; `${output}` = script output, `\n`/`\t` = newline/tab (caption for `--img` commands) |
+| `script` | `.sh` file to run, relative to the commands directory (plain commands) |
+| `menu` | options submenu instead of a script (see the menu section above) |
+| `template` | optional; `${output}` = script output, `\n`/`\t` = newline/tab (caption for `--img` commands; plain commands only) |
 | `img` | optional; when true the script's output is a path to an image sent as a photo |
 | `timeout_sec` | optional, 1–300 (default 30) |
 
@@ -192,6 +274,10 @@ treat every update as hostile until proven trustworthy.
 
 - Users can only trigger commands the **operator** has defined. There is no
   path for a user to inject text into a shell command.
+- Menu option buttons are just indices into the stored menu: pressing one
+  runs the option's script (or the shared handler, with the operator-defined
+  option value as `$1` / `TPR_OPTION`). The value never touches the command
+  line as free input — it is an argument to an approved `sh` invocation.
 - Script paths come from the operator-approved store and are launched in
   `argv` form (`sh <path>`), never through `sh -c` with unfiltered input — so
   there is no shell-injection surface. Paths must be relative, stay inside

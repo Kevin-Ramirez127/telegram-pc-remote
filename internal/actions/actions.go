@@ -45,6 +45,12 @@ type ExecuteOpts struct {
 	// WorkDir is the working directory for the script (the commands dir),
 	// so relative image paths and relative file access behave predictably.
 	WorkDir string
+	// Option is the menu option's value (or label). When non-empty it is
+	// passed to the script as its first argument ($1) and as TPR_OPTION.
+	Option string
+	// OptionLabel is the menu option's button label, passed as
+	// TPR_OPTION_LABEL (empty for plain commands).
+	OptionLabel string
 }
 
 // Result is what the bot sends back to the chat.
@@ -116,7 +122,17 @@ func Execute(ctx context.Context, cmd store.Command, opts ExecuteOpts) (Result, 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	out, err := run(ctx, []string{"sh", opts.ScriptPath}, opts.WorkDir, timeout)
+	args := []string{"sh", opts.ScriptPath}
+	var extraEnv []string
+	if opts.Option != "" {
+		args = append(args, opts.Option)
+		extraEnv = append(extraEnv, "TPR_OPTION="+opts.Option)
+	}
+	if opts.OptionLabel != "" {
+		extraEnv = append(extraEnv, "TPR_OPTION_LABEL="+opts.OptionLabel)
+	}
+
+	out, err := run(ctx, args, opts.WorkDir, extraEnv, timeout)
 	out = truncate(out, store.MaxOutputBytes)
 	if err != nil {
 		return Result{Text: out}, err
@@ -133,13 +149,13 @@ func Execute(ctx context.Context, cmd store.Command, opts ExecuteOpts) (Result, 
 
 // run executes args (argv form) with the hardened settings and a deadline
 // taken from ctx. On error the partial output is still returned.
-func run(ctx context.Context, args []string, dir string, timeout time.Duration) (string, error) {
+func run(ctx context.Context, args []string, dir string, extraEnv []string, timeout time.Duration) (string, error) {
 	buf := &syncBuffer{}
 	// CommandContext kills the direct child when ctx expires; a process group
 	// kill below catches everything else in the subtree.
 	c := exec.CommandContext(ctx, args[0], args[1:]...)
 	c.Dir = dir
-	c.Env = minimalEnv
+	c.Env = append(append([]string{}, minimalEnv...), extraEnv...)
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	c.Stdout = buf
 	c.Stderr = buf
@@ -224,12 +240,14 @@ func sniffImage(data []byte) string {
 // renderTemplate substitutes ${output} and expands \n / \t escapes so
 // multi-line replies are easy to author on a single line.
 func renderTemplate(template, output string) string {
-	s := expandEscapes(template)
+	s := ExpandEscapes(template)
 	s = strings.ReplaceAll(s, "${output}", output)
 	return s
 }
 
-func expandEscapes(s string) string {
+// ExpandEscapes turns \n / \t into real newlines/tabs (shared by templates
+// and menu prompts).
+func ExpandEscapes(s string) string {
 	s = strings.ReplaceAll(s, `\n`, "\n")
 	s = strings.ReplaceAll(s, `\t`, "\t")
 	return s

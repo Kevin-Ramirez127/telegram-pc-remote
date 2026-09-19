@@ -224,3 +224,169 @@ func TestValidText(t *testing.T) {
 		}
 	}
 }
+
+const validMenuCommands = `{
+  "version": 2,
+  "commands": [
+    {"text": "Status", "script": "status.sh"},
+    {"text": "Change Workspace", "menu": {
+      "id": "change-workspace",
+      "prompt": "Select Workspace:",
+      "script": "workspace.sh",
+      "options": [
+        {"label": "1"},
+        {"label": "3"},
+        {"label": "Custom", "value": "9", "script": "ws-custom.sh"}
+      ]
+    }, "timeout_sec": 10}
+  ]
+}`
+
+func TestLoadMenusValid(t *testing.T) {
+	dir, root := setup(t, map[string]string{
+		"status.sh":    "echo up\n",
+		"workspace.sh": "echo ws $1\n",
+		"ws-custom.sh": "echo custom\n",
+	})
+	p := writeCommands(t, dir, validMenuCommands)
+	s, err := New(p, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, ok := s.Lookup("Change Workspace")
+	if !ok || cmd.Menu == nil {
+		t.Fatalf("menu command not found: %+v", cmd)
+	}
+	if cmd.Menu.ID != "change-workspace" || len(cmd.Menu.Options) != 3 {
+		t.Fatalf("menu not loaded correctly: %+v", cmd.Menu)
+	}
+	byID, ok := s.LookupMenu("change-workspace")
+	if !ok || byID.Text != "Change Workspace" {
+		t.Fatalf("LookupMenu failed: %+v %v", byID, ok)
+	}
+	if _, ok := s.LookupMenu("nope"); ok {
+		t.Fatal("unknown menu id must not match")
+	}
+	// menu command resolves as script command only via its own paths
+	plain, _ := s.Lookup("Status")
+	if p, err := s.ResolveScript(plain); err != nil || filepath.Base(p) != "status.sh" {
+		t.Fatalf("ResolveScript: %v %v", p, err)
+	}
+	if p, err := s.ResolveScriptPath("workspace.sh"); err != nil || filepath.Base(p) != "workspace.sh" {
+		t.Fatalf("ResolveScriptPath: %v %v", p, err)
+	}
+}
+
+func TestMenuRequiresSharedHandlerOrPerOptionScripts(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	p := writeCommands(t, dir, `{
+	  "version": 2,
+	  "commands": [{"text": "M", "menu": {
+	    "id": "m",
+	    "prompt": "Pick:",
+	    "options": [{"label": "A"}]
+	  }}]
+	}`)
+	if _, err := New(p, root); err == nil {
+		t.Fatal("menu without handler and an option without own script must be rejected")
+	}
+}
+
+func TestMenuRejectsDuplicateIDs(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	p := writeCommands(t, dir, `{
+	  "version": 2,
+	  "commands": [
+	    {"text": "M1", "menu": {"id": "same", "options": [{"label": "A", "script": "a.sh"}]}},
+	    {"text": "M2", "menu": {"id": "same", "options": [{"label": "B", "script": "a.sh"}]}}
+	  ]
+	}`)
+	if _, err := New(p, root); err == nil {
+		t.Fatal("duplicate menu ids must be rejected")
+	}
+}
+
+func TestMenuAcceptsEmptyOptions(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	p := writeCommands(t, dir, `{
+	  "version": 2,
+	  "commands": [{"text": "M", "menu": {"id": "m", "script": "a.sh", "options": []}}]
+	}`)
+	if _, err := New(p, root); err != nil {
+		t.Fatalf("menu with no options yet (mid-construction) should load fine: %v", err)
+	}
+}
+
+func TestMenuRejectsDuplicateOptionLabels(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	p := writeCommands(t, dir, `{
+	  "version": 2,
+	  "commands": [{"text": "M", "menu": {
+	    "id": "m", "script": "a.sh",
+	    "options": [{"label": "A"}, {"label": "A"}]
+	  }}]
+	}`)
+	if _, err := New(p, root); err == nil {
+		t.Fatal("duplicate option labels must be rejected")
+	}
+}
+
+func TestMenuRejectsBadID(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	for _, id := range []string{"Upper", "with space", ""} {
+		p := writeCommands(t, dir, `{
+		  "version": 2,
+		  "commands": [{"text": "M", "menu": {
+		    "id": "`+id+`", "script": "a.sh",
+		    "options": [{"label": "A"}]
+		  }}]
+		}`)
+		if _, err := New(p, root); err == nil {
+			t.Fatalf("menu id %q must be rejected", id)
+		}
+	}
+}
+
+func TestMenuRejectsBothScriptAndMenu(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	p := writeCommands(t, dir, `{
+	  "version": 2,
+	  "commands": [{"text": "M", "script": "a.sh", "menu": {
+	    "id": "m", "script": "a.sh",
+	    "options": [{"label": "A"}]
+	  }}]
+	}`)
+	if _, err := New(p, root); err == nil {
+		t.Fatal("command with both script and menu must be rejected")
+	}
+}
+
+func TestMenuRejectsTemplateAndImg(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	for _, extra := range []string{`"template": "x: ${output}"`, `"img": true`} {
+		p := writeCommands(t, dir, `{
+		  "version": 2,
+		  "commands": [{"text": "M", `+extra+`, "menu": {
+		    "id": "m", "script": "a.sh",
+		    "options": [{"label": "A"}]
+		  }}]
+		}`)
+		if _, err := New(p, root); err == nil {
+			t.Fatalf("menu command with %s must be rejected", extra)
+		}
+	}
+}
+
+func TestMenuRejectsMissingOptionScript(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	p := writeCommands(t, dir, `{
+	  "version": 2,
+	  "commands": [{"text": "M", "menu": {
+	    "id": "m", "script": "a.sh",
+	    "options": [{"label": "A"}, {"label": "B", "script": "ghost.sh"}]
+	  }}]
+	}`)
+	if _, err := New(p, root); err == nil {
+		t.Fatal("option referencing a missing script must be rejected")
+	}
+}
