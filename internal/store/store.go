@@ -5,17 +5,19 @@
 //   - Script commands are backed by a user-authored shell script in the
 //     commands directory. Pressing the button (or typing the exact label)
 //     runs the registered script; the script's stdout becomes the reply.
-//     They may declare: script, template ($(output), \n, \t), img and
+//     They may declare: script, template (${output}, \n, \t), img and
 //     timeout_sec.
 //   - Menu commands answer with a prompt plus option buttons. Each option
 //     has a label (and optional value + own script). An option either runs
-//     its own script, or — when it has none — the menu's shared handler
-//     script, which receives the option's value as $1 / TPR_OPTION.
+//     its own script, falls back to the menu's shared handler script —
+//     which receives the option's value as $1 / TPR_OPTION — or opens
+//     another menu (menu_id) as a nested submenu.
 //
 // The file format is validated strictly: script paths must stay inside the
 // commands directory, must be regular files ending in .sh, templates may only
-// reference ${output}, menu ids/option labels must be unique, and every load
-// only ever swaps in fully-validated content.
+// reference ${output}, menu ids/option labels must be unique, menu_id
+// references must resolve, and every load only ever swaps in fully-validated
+// content.
 package store
 
 import (
@@ -71,6 +73,10 @@ type Command struct {
 	// Script.
 	Menu *Menu `json:"menu,omitempty"`
 
+	// Hidden excludes the command from the /menu keyboard. Useful for menus
+	// that exist only as submenu targets of other options.
+	Hidden bool `json:"hidden,omitempty"`
+
 	// Template optionally shapes the reply. ${output} is replaced by the
 	// script's output; \n / \t become real newlines/tabs. (script commands
 	// only — menu commands use their prompt instead.)
@@ -111,6 +117,10 @@ type MenuOption struct {
 	Value string `json:"value,omitempty"`
 	// Script, when set, overrides the menu's shared handler for this option.
 	Script string `json:"script,omitempty"`
+	// MenuID, when set, makes this option open another menu (by its id) as a
+	// nested submenu instead of running a script. An option that opens a menu
+	// cannot also carry a script or a value.
+	MenuID string `json:"menu_id,omitempty"`
 }
 
 type file struct {
@@ -216,6 +226,31 @@ func (s *Store) validate(f *file) error {
 			return fmt.Errorf("command %q: timeout_sec must be 1..300", c.Text)
 		}
 	}
+	if err := s.validateMenuRefs(f.Commands, menuIDs); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateMenuRefs ensures every option that opens a nested menu (menu_id)
+// points at a menu id that actually exists.
+func (s *Store) validateMenuRefs(commands []Command, menuIDs map[string]struct{}) error {
+	if len(menuIDs) == 0 {
+		return nil
+	}
+	for _, c := range commands {
+		if c.Menu == nil {
+			continue
+		}
+		for _, o := range c.Menu.Options {
+			if o.MenuID == "" {
+				continue
+			}
+			if _, ok := menuIDs[o.MenuID]; !ok {
+				return fmt.Errorf("command %q: option %q references unknown menu id %q", c.Text, o.Label, o.MenuID)
+			}
+		}
+	}
 	return nil
 }
 
@@ -254,7 +289,15 @@ func (s *Store) validateMenu(c Command) error {
 		if o.Value != "" && !ValidText(o.Value) {
 			return fmt.Errorf("command %q: option %q value must be 1-%d characters without control characters", c.Text, o.Label, MaxTextBytes)
 		}
-		if o.Script != "" {
+		if o.MenuID != "" {
+			// Navigation option: opens a nested menu, runs no script.
+			if o.Script != "" || o.Value != "" {
+				return fmt.Errorf("command %q: option %q: an option that opens a menu (menu_id) cannot also have a script or a value", c.Text, o.Label)
+			}
+			if err := validMenuID(o.MenuID); err != nil {
+				return fmt.Errorf("command %q: option %q: %w", c.Text, o.Label, err)
+			}
+		} else if o.Script != "" {
 			if err := s.validateScript(o.Script); err != nil {
 				return fmt.Errorf("command %q: option %q: %w", c.Text, o.Label, err)
 			}
@@ -266,8 +309,8 @@ func (s *Store) validateMenu(c Command) error {
 		}
 	} else {
 		for _, o := range m.Options {
-			if o.Script == "" {
-				return fmt.Errorf("command %q: option %q needs its own script because the menu has no handler script", c.Text, o.Label)
+			if o.Script == "" && o.MenuID == "" {
+				return fmt.Errorf("command %q: option %q needs its own script (or a menu_id) because the menu has no handler script", c.Text, o.Label)
 			}
 		}
 	}

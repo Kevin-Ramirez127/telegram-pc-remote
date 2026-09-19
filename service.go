@@ -153,6 +153,8 @@ func (s *service) process(upd tgbotapi.Update) {
 // match, it sends an error message (the caller never has other command names).
 // Script commands are executed and their result reported (which may be a
 // photo for --img commands); menu commands show their option buttons.
+// After a script command finishes, the general menu is re-sent so the user
+// is back at the top-level picker.
 func (s *service) runCommand(text string, chatID int64) {
 	cmd, ok := s.store.Lookup(text)
 	if !ok {
@@ -179,6 +181,9 @@ func (s *service) runCommand(text string, chatID int64) {
 		WorkDir:    s.cfg.CommandsDir,
 	})
 	s.sendResult(chatID, cmd, res, err)
+
+	// The script finished: re-send the general menu.
+	s.showMenu(chatID)
 }
 
 // showMenuOptions answers a menu command with its prompt and one button per
@@ -219,9 +224,15 @@ func optionRows(m *store.Menu, text string) [][]tgbotapi.InlineKeyboardButton {
 	return rows
 }
 
-// runMenuOption handles a pressed option button: it resolves the option to a
-// script (its own, or the menu's shared handler) and runs it, passing the
-// option's value as $1 / TPR_OPTION so one handler can branch on the choice.
+// runMenuOption handles a pressed option button.
+//
+//   - A navigation option (menu_id) opens the referenced menu: its options
+//     are shown and nothing is re-sent — the flow descends until a final
+//     (leaf) script runs.
+//   - A script option runs its own script (or the menu's shared handler),
+//     passing the option's value as $1 / TPR_OPTION. Once its reply is out,
+//     the GENERAL menu (/menu: every non-hidden command) is re-sent so the
+//     user is back at the top-level picker.
 func (s *service) runMenuOption(chatID int64, data string) {
 	menuID, idx, ok := parseOptionData(data)
 	if !ok {
@@ -235,16 +246,19 @@ func (s *service) runMenuOption(chatID int64, data string) {
 	}
 
 	opt := cmd.Menu.Options[idx]
-	scriptRel := opt.Script
-	value := opt.Value
-	if value == "" {
-		value = opt.Label
-	}
-	if scriptRel == "" {
-		// Fall back to the menu's shared handler, which receives the value.
-		scriptRel = cmd.Menu.Script // guaranteed non-empty by store validation
+
+	// Navigation: this option opens another (custom) menu.
+	if opt.MenuID != "" {
+		target, ok := s.store.LookupMenu(opt.MenuID)
+		if !ok {
+			s.send(chatID, fmt.Sprintf("❌ Option %q is misconfigured: menu %q not found.", opt.Label, opt.MenuID))
+			return
+		}
+		s.showMenuOptions(chatID, target)
+		return
 	}
 
+	scriptRel, value := resolveOption(cmd.Menu, opt)
 	scriptPath, err := s.store.ResolveScriptPath(scriptRel)
 	if err != nil {
 		s.send(chatID, fmt.Sprintf("❌ Option %q is misconfigured: %v", opt.Label, err))
@@ -263,6 +277,24 @@ func (s *service) runMenuOption(chatID int64, data string) {
 	msg := cmd
 	msg.Text = opt.Label // report failures against the pressed option
 	s.sendResult(chatID, msg, res, err)
+
+	// The final script ended: re-send the general menu.
+	s.showMenu(chatID)
+}
+
+// resolveOption determines which script an option runs (its own, or the
+// menu's shared handler — non-empty by store validation) and the value
+// passed to it as $1 / TPR_OPTION (the option's value, or its label).
+func resolveOption(menu *store.Menu, opt store.MenuOption) (scriptRel, value string) {
+	scriptRel = opt.Script
+	if scriptRel == "" {
+		scriptRel = menu.Script
+	}
+	value = opt.Value
+	if value == "" {
+		value = opt.Label
+	}
+	return scriptRel, value
 }
 
 func (s *service) staleButton(chatID int64) {
@@ -304,20 +336,26 @@ func (s *service) send(chatID int64, text string) {
 
 // showMenu builds the inline keyboard from the configured commands: each
 // button label IS the command text, and its callback data is the same text.
+// Hidden commands (submenu targets) are excluded.
 func (s *service) showMenu(chatID int64) {
-	cmds := s.store.List()
-	if len(cmds) == 0 {
+	visible := make([]store.Command, 0)
+	for _, c := range s.store.List() {
+		if !c.Hidden {
+			visible = append(visible, c)
+		}
+	}
+	if len(visible) == 0 {
 		s.send(chatID, "No commands configured. Add some with scripts/manage_commands.sh")
 		return
 	}
 
-	rows := make([][]tgbotapi.InlineKeyboardButton, 0, (len(cmds)+1)/2)
-	for i := 0; i < len(cmds); i += 2 {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, (len(visible)+1)/2)
+	for i := 0; i < len(visible); i += 2 {
 		row := []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData(cmds[i].Text, cmds[i].Text),
+			tgbotapi.NewInlineKeyboardButtonData(visible[i].Text, visible[i].Text),
 		}
-		if i+1 < len(cmds) {
-			row = append(row, tgbotapi.NewInlineKeyboardButtonData(cmds[i+1].Text, cmds[i+1].Text))
+		if i+1 < len(visible) {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(visible[i+1].Text, visible[i+1].Text))
 		}
 		rows = append(rows, row)
 	}

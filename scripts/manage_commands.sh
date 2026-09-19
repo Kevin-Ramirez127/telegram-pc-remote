@@ -67,6 +67,9 @@ validate_json() {
     and ([.commands[].text] | length) == ([.commands[].text] | unique | length)
     and ([.commands[] | select(.menu != null) | .menu.id] | length) ==
         ([.commands[] | select(.menu != null) | .menu.id] | unique | length)
+    and ((([.commands[] | select(.menu != null) | .menu.id]) as $ids
+      | all([.commands[] | select(.menu != null) | .menu.options[]? | .menu_id? // empty][];
+            $ids | index(.) != null)))
     and (all(.commands[];
         (.text | type == "string") and (.text | length) >= 1 and (.text | length) <= 64
         and (((((.script // "") != "") and ((.menu // null) == null))
@@ -87,19 +90,27 @@ validate_json() {
                  and (all(.menu.options[];
                      (.label | type == "string") and (.label | length) >= 1 and (.label | length) <= 64
                      and ((.value == null) or ((.value | type == "string") and (.value | length) >= 1 and (.value | length) <= 64))
-                     and (((.script // "") == "")
-                          or ((.script | type == "string") and (.script | length) <= 512
-                              and (.script | endswith(".sh")) and (.script | startswith("/") | not)
-                              and (((.script | split("/")) | any(. == "..")) | not)))))
+                     and (if ((.menu_id // "") != "") then
+                           (.menu_id | type == "string") and (.menu_id | length) <= 32
+                           and (.menu_id | test("^[a-z0-9-]+$"))
+                           and ((.script // "") == "") and ((.value // null) == null)
+                         else
+                           (((.script // "") == "")
+                            or ((.script | type == "string") and (.script | length) <= 512
+                                and (.script | endswith(".sh")) and (.script | startswith("/") | not)
+                                and (((.script | split("/")) | any(. == "..")) | not)))
+                         end)))
                  and (((((.menu.script // "") != "")
                         and (.menu.script | type == "string") and ((.menu.script | length) <= 512)
                         and (.menu.script | endswith(".sh")) and (.menu.script | startswith("/") | not)
                         and (((.menu.script | split("/")) | any(. == "..")) | not))
-                       or (((.menu.script // "") == "") and (all(.menu.options[]; ((.script // "") != ""))))))))
+                       or (((.menu.script // "") == "")
+                           and (all(.menu.options[]; (((.script // "") != "") or ((.menu_id // "") != "")))))))))
         and ((.timeout_sec // 30) >= 1) and ((.timeout_sec // 30) <= 300)
         and ((.template // "") == ""
              or ((.template | type == "string") and ((.template | length) <= 4096)
                  and (all([.template | scan("\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}")][]; .[0] == "output"))))
+        and ((has("hidden") | not) or (.hidden | type == "boolean"))
         and ((has("img") | not) or (.img | type == "boolean"))))
   ' "$1" >/dev/null
 }
@@ -213,17 +224,21 @@ Usage: ./manage_commands.sh <command> [options]
                     that image as a photo (with the template as caption).
 
   addmenu <TEXT> [--prompt "..."] [--script <shared-handler.sh>]
-          [--menu-id <id>] [--timeout <1-300>]
+          [--menu-id <id>] [--hidden] [--timeout <1-300>]
       Register a button that answers with chooseable options (also buttons).
       The options are added with 'addopt'. Each option either runs its own
-      script or falls back to the menu's shared handler, which receives the
-      option's value as $1 (and TPR_OPTION); the label as TPR_OPTION_LABEL.
+      script, falls back to the menu's shared handler — which receives the
+      option's value as $1 (and TPR_OPTION; the label as TPR_OPTION_LABEL) —
+      or opens another menu as a nested submenu.
         --prompt    text shown above the option buttons (default: "Select an
                     option: "). \n and \t become newlines/tabs.
         --menu-id   short id used in the option buttons' callback data
                     (default: derived from the text, e.g. "change-workspace").
+        --hidden    hide this command from the /menu keyboard — use it for
+                    menus that exist only as submenu targets.
 
   addopt <TEXT> --label "<option>" [--value <v>] [--script <file.sh>]
+        [--menu <menu-id-or-TEXT>]
       Add an option button to menu <TEXT>.
         --label    button text (this is also the value passed to the handler
                    unless --value overrides it).
@@ -231,6 +246,9 @@ Usage: ./manage_commands.sh <command> [options]
                    label (as $1 / TPR_OPTION).
         --script   optional per-option script; without it the menu's shared
                    handler runs.
+        --menu     make this option open ANOTHER menu (a nested submenu),
+                   given its menu id or the menu command's text. Cannot be
+                   combined with --script/--value.
 
   delopt <TEXT> --label "<option>"   Remove an option button from menu <TEXT>.
 
@@ -239,7 +257,14 @@ Usage: ./manage_commands.sh <command> [options]
   edit <TEXT> [--rename <NEW_TEXT>] [--script <file.sh>] [--template "..."]
        [--img|--no-img] [--timeout <1-300|0 resets to default>]
        [--menu-prompt "..."] [--menu-script <file.sh>]
+       [--hidden|--no-hidden]
       Change any fields of an existing command (menu fields apply to menus).
+
+After ANY script command ends (a top-level script button like report.sh, or
+a menu option), the bot re-sends the GENERAL menu (the /menu keyboard with
+all non-hidden commands), so you're back at the top level. Descending into a
+nested menu sends nothing extra; the general menu only comes back after the
+final script of the flow has replied.
 
   delete <TEXT>          Remove a command.
 
@@ -302,7 +327,7 @@ list_cmd() {
   echo "commands ($n):"
   if (( n > 0 )); then
     jq -r '.commands[]
-      | "\t\(.text)\t" + (if (.menu // null) != null
+      | "\t\(.text)\(if (.hidden // false) then " (hidden)" else "" end)\t" + (if (.menu // null) != null
           then "[menu]\tid: \(.menu.id)\thandler: \(.menu.script // "(none)")\toptions: \(.menu.options | length)"
           else "[\(if (.img // false) then "img" else "text" end)]\tscript: \(.script)\ttemplate: \(if .template // "" | length > 0 then (.template // "") else "(no template)" end)" end)
           + "\t(timeout: \(.timeout_sec // 30)s)"' "$COMMANDS_FILE" \
@@ -318,7 +343,7 @@ edit_cmd() {
   local set_script=false set_template=false set_timeout=false set_img=false
   local menu_prompt="" menu_script=""
   local set_menu_prompt=false set_menu_script=false
-  local img=false
+  local img=false hidden=false set_hidden=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -330,6 +355,8 @@ edit_cmd() {
       --timeout)  timeout="${2:-}"; set_timeout=true; shift 2 ;;
       --menu-prompt)  menu_prompt="${2:-}"; set_menu_prompt=true; shift 2 ;;
       --menu-script)  menu_script="${2:-}"; set_menu_script=true; shift 2 ;;
+      --hidden)   hidden=true; set_hidden=true; shift ;;
+      --no-hidden) hidden=false; set_hidden=true; shift ;;
       *) fail "edit: unknown option '$1' (try 'help')" ;;
     esac
   done
@@ -349,13 +376,15 @@ edit_cmd() {
   if $set_img; then im_present="true"; else im_present="false"; fi
   if $set_menu_prompt; then mp_present="true"; else mp_present="false"; fi
   if $set_menu_script; then ms_present="true"; else ms_present="false"; fi
+  if $set_hidden; then hd_present="true"; else hd_present="false"; fi
   commit --arg text "$text" --arg new_text "$new_text" --arg new_script "$new_script" \
          --arg template "$template" --argjson set_template "$tpl_present" \
          --argjson timeout "$timeout" --argjson set_timeout "$tmo_present" \
          --argjson img "$img" --argjson set_img "$im_present" \
          --argjson set_script "$sc_present" \
          --arg menu_prompt "$menu_prompt" --argjson set_menu_prompt "$mp_present" \
-         --arg menu_script "$menu_script" --argjson set_menu_script "$ms_present" '
+         --arg menu_script "$menu_script" --argjson set_menu_script "$ms_present" \
+         --argjson hidden "$hidden" --argjson set_hidden "$hd_present" '
     def idx: [.commands[].text] | index($text);
     if idx == null then
       error("command not found: " + $text)
@@ -369,7 +398,8 @@ edit_cmd() {
         | if $set_img then .img = $img else . end
         | if $set_timeout then (if $timeout > 0 then .timeout_sec = $timeout else del(.timeout_sec) end) else . end
         | if $set_menu_prompt then .menu.prompt = $menu_prompt else . end
-        | if $set_menu_script then (if $menu_script != "" then .menu.script = $menu_script else del(.menu.script) end) else . end)
+        | if $set_menu_script then (if $menu_script != "" then .menu.script = $menu_script else del(.menu.script) end) else . end
+        | if $set_hidden then (if $hidden then .hidden = true else del(.hidden) end) else . end)
     end
   '
 }
@@ -391,7 +421,7 @@ delete_cmd() {
 addmenu_cmd() {
   [[ $# -ge 1 ]] || fail "addmenu requires a <TEXT>"
   local text="$1"; shift
-  local prompt="" script="" menu_id="" timeout=0 timeout_set=false
+  local prompt="" script="" menu_id="" timeout=0 timeout_set=false hidden=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -399,6 +429,7 @@ addmenu_cmd() {
       --script)   script="${2:-}"; shift 2 ;;
       --menu-id)  menu_id="${2:-}"; shift 2 ;;
       --timeout)  timeout="${2:-}"; timeout_set=true; shift 2 ;;
+      --hidden)   hidden=true; shift ;;
       *) fail "addmenu: unknown option '$1' (try 'help')" ;;
     esac
   done
@@ -416,7 +447,7 @@ addmenu_cmd() {
   [[ -n "$prompt" ]] || prompt="Select an option:"
   backup
   commit --arg text "$text" --arg menu_id "$menu_id" --arg prompt "$prompt" \
-         --arg script "$script" --argjson timeout "$timeout" '
+         --arg script "$script" --argjson timeout "$timeout" --argjson hidden "$hidden" '
     if ([.commands[].text] | index($text)) then
       error("command already exists: " + $text)
     elif ([.commands[] | select(.menu != null) | .menu.id] | index($menu_id)) != null then
@@ -425,7 +456,8 @@ addmenu_cmd() {
       .commands += [{text: $text,
                      menu: {id: $menu_id, prompt: $prompt, options: []}
                        + (if $script != "" then {script: $script} else {} end)}
-        + (if $timeout > 0 then {timeout_sec: $timeout} else {} end)]
+        + (if $timeout > 0 then {timeout_sec: $timeout} else {} end)
+        + (if $hidden then {hidden: true} else {} end)]
     end
   '
   echo "menu id: $menu_id — add options with: $0 addopt \"$text\" --label \"<option>\""
@@ -434,13 +466,15 @@ addmenu_cmd() {
 addopt_cmd() {
   [[ $# -ge 1 ]] || fail "addopt requires a <TEXT>"
   local text="$1"; shift
-  local label="" value="" script=""
+  local label="" value="" script="" target=""
+  local by_menu=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --label)  label="${2:-}"; shift 2 ;;
       --value)  value="${2:-}"; shift 2 ;;
       --script) script="${2:-}"; shift 2 ;;
+      --menu)   target="${2:-}"; shift 2 ;;
       *) fail "addopt: unknown option '$1' (try 'help')" ;;
     esac
   done
@@ -450,24 +484,55 @@ addopt_cmd() {
     validate_text "$value" || fail "addopt: --value must be 1-64 characters without control characters"
   fi
   [[ -n "$script" ]] && validate_script "$script"
+  if [[ -n "$target" ]]; then
+    # A menu option opens another menu instead of running a script.
+    if [[ -n "$script" || -n "$value" ]]; then
+      fail "addopt: --menu (open another menu) cannot be combined with --script or --value"
+    fi
+    by_menu=true
+  fi
 
   ensure_file
+  local menu_id=""
+  if $by_menu; then
+    # Resolve the target (its id, or the menu command's text) to a menu id.
+    # Done on the current file, so a later commit cannot reference a stale id.
+    menu_id="$(jq -r --arg target "$target" '
+      if ([.commands[] | select(.menu != null) | .menu.id] | index($target)) != null then $target
+      else ([.commands[] | select(.text == $target and .menu != null) | .menu.id] | first // "") end' "$COMMANDS_FILE")"
+    [[ -n "$menu_id" ]] || fail "addopt: no menu found for target '$target' (id or menu command text)"
+  fi
   backup
-  commit --arg text "$text" --arg label "$label" --arg value "$value" --arg script "$script" '
-    def idx: [.commands[].text] | index($text);
-    if idx == null then
-      error("command not found: " + $text)
-    elif ((.commands[idx].menu // null) == null) then
-      error("not a menu command: " + $text)
-    elif ([.commands[idx].menu.options[].label] | index($label)) != null then
-      error("option already exists: " + $label)
-    else
-      .commands[idx].menu.options +=
-        [{label: $label}
-         + (if $value != "" then {value: $value} else {} end)
-         + (if $script != "" then {script: $script} else {} end)]
-    end
-  '
+  if $by_menu; then
+    commit --arg text "$text" --arg label "$label" --arg menu_id "$menu_id" '
+      def idx: [.commands[].text] | index($text);
+      if idx == null then
+        error("command not found: " + $text)
+      elif ((.commands[idx].menu // null) == null) then
+        error("not a menu command: " + $text)
+      elif ([.commands[idx].menu.options[].label] | index($label)) != null then
+        error("option already exists: " + $label)
+      else
+        .commands[idx].menu.options += [{label: $label, menu_id: $menu_id}]
+      end
+    '
+  else
+    commit --arg text "$text" --arg label "$label" --arg value "$value" --arg script "$script" '
+      def idx: [.commands[].text] | index($text);
+      if idx == null then
+        error("command not found: " + $text)
+      elif ((.commands[idx].menu // null) == null) then
+        error("not a menu command: " + $text)
+      elif ([.commands[idx].menu.options[].label] | index($label)) != null then
+        error("option already exists: " + $label)
+      else
+        .commands[idx].menu.options +=
+          [{label: $label}
+           + (if $value != "" then {value: $value} else {} end)
+           + (if $script != "" then {script: $script} else {} end)]
+      end
+    '
+  fi
 }
 
 delopt_cmd() {
@@ -517,7 +582,7 @@ opts_cmd() {
         "menu \"\(.commands[idx].text)\"  id: \(.commands[idx].menu.id)  handler: \(.commands[idx].menu.script // "(none)")",
         "prompt: \(.commands[idx].menu.prompt // "(default)")",
         (.commands[idx].menu.options[] |
-          "  [\(.label)]  value: \(.value // "(=label)")  script: \(.script // "(menu handler)")")
+          "  [\(.label)]  value: \(.value // "(=label)")  \(if (.menu_id // "") != "" then "opens menu: \(.menu_id)" else "script: \(.script // "(menu handler)")" end)")
       end' "$COMMANDS_FILE"
   fi
 }

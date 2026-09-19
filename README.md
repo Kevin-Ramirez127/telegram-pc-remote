@@ -28,11 +28,17 @@ Backend: **Go**. Command management: **bash** (`scripts/manage_commands.sh`).
 
 ---
 
-## Quick start
+## Set up your Telegram Bot
+### 1. Go to your Telegram app / Telegram Web and start a chat with ```@BotFather``` and send  ```/newbot```.
+### 2. Set up the bot name (is the visible name in chat).
+### 3. Create your bot username (_not bot name_), if you want to make a safer bot read [safe bot advice](safe_bot_advices.md) file.
+### 4. ```@BotFather``` will give to you the chatbot link and ```API Key```
+
+## Configure Telegram Bot
 
 ```bash
 # 1. Configure
-cp .env.example .env          # set TELEGRAM_BOT_TOKEN (from @BotFather)
+cp .env.example .env          # set TELEGRAM_BOT_TOKEN (from @BotFather) you got on previous step
 chmod 600 .env
 
 # 2. Whitelist yourself (numeric IDs — get them from @userinfobot)
@@ -113,6 +119,9 @@ yourself; pressing one either
   **shared handler script**, which receives the option as a variable
   (`$1` and `TPR_OPTION`; the button label as `TPR_OPTION_LABEL`), so a
   single script can branch on the choice — that's up to you when you write it.
+- **opens another menu** (a nested submenu) declared with `--menu` on
+  `addopt`. The referenced menu can be hidden from the main `/menu` keyboard
+  (`--hidden` on `addmenu`), so it only exists as a submenu target.
 
 ```bash
 # 1. create the menu button (a handler script is optional here)
@@ -127,9 +136,24 @@ done
 # an option can instead call its own script (overrides the handler)
 scripts/manage_commands.sh addopt "Change Workspace" --label "Custom" --value 9 --script status.sh
 
+# an option can open a nested (custom) menu — the target may be hidden
+scripts/manage_commands.sh addmenu "Media" --prompt "Media actions:" --script media.sh
+scripts/manage_commands.sh addmenu "Volume Menu" --hidden --prompt "Volume:" --script volume.sh
+scripts/manage_commands.sh addopt "Media" --label "Volume" --menu "Volume Menu"
+scripts/manage_commands.sh addopt "Volume Menu" --label "+" --value +2
+scripts/manage_commands.sh addopt "Volume Menu" --label "-" --value -2
+
 scripts/manage_commands.sh opts "Change Workspace"        # list options
 scripts/manage_commands.sh delopt "Change Workspace" --label 5
 ```
+
+**After any script finishes — a plain script command like `report.sh` or a
+menu option — the bot re-sends the general menu** (the `/menu` keyboard with
+every non-hidden command), so you're back at the top level and can pick any
+other command. Descending into a nested menu (via `--menu`) sends nothing
+extra — the nested menu's options just appear — and the general menu only
+comes back after the **final** (leaf) script of the flow has replied. A
+navigation press never triggers a re-send itself.
 
 `commands/workspace.sh` is a shared handler example: it reads the pressed
 value from `$1` / `TPR_OPTION` (replace the `echo` with `wmctrl -s "$1"`,
@@ -151,6 +175,21 @@ value from `$1` / `TPR_OPTION` (replace the `echo` with `wmctrl -s "$1"`,
 }
 ```
 
+A nested menu reference adds `menu_id` to an option (the referenced menu is
+just another menu command, usually `hidden: true`):
+
+```json
+{
+  "text": "Media",
+  "menu": {
+    "id": "media",
+    "prompt": "Media actions:",
+    "script": "media.sh",
+    "options": [ { "label": "Volume", "menu_id": "volume-menu" } ]
+  }
+}
+```
+
 | Field | Meaning |
 |---|---|
 | `menu.id` | short stable handle used in the option buttons' callback data (auto-generated; `--menu-id` to override) |
@@ -159,6 +198,8 @@ value from `$1` / `TPR_OPTION` (replace the `echo` with `wmctrl -s "$1"`,
 | `options[].label` | button text, also the value passed on press (unless `value` is set) |
 | `options[].value` | optional value passed to the handler instead of the label |
 | `options[].script` | optional per-option script (overrides the shared handler) |
+| `options[].menu_id` | optional; pressing the option opens the referenced menu instead of running a script (no `script`/`value` allowed together) |
+| `hidden` | hides the command from the `/menu` keyboard — use it for submenu targets |
 
 ### Management script
 
@@ -172,6 +213,10 @@ value from `$1` / `TPR_OPTION` (replace the `echo` with `wmctrl -s "$1"`,
 ./scripts/manage_commands.sh addmenu "Change Workspace" --prompt "Select Workspace:" --script workspace.sh
 for i in 1 2 3 4 5; do ./scripts/manage_commands.sh addopt "Change Workspace" --label "$i"; done
 ./scripts/manage_commands.sh addopt "Change Workspace" --label "Custom" --value 9 --script status.sh
+
+# nested (custom) submenu: an option that opens another menu
+./scripts/manage_commands.sh addmenu "Volume Menu" --hidden --prompt "Volume:" --script volume.sh
+./scripts/manage_commands.sh addopt "Media" --label "Volume" --menu "Volume Menu"
 
 # list
 ./scripts/manage_commands.sh list
@@ -220,6 +265,7 @@ or a menu:
 | `text` | button label AND exact text to match (1–64 chars) |
 | `script` | `.sh` file to run, relative to the commands directory (plain commands) |
 | `menu` | options submenu instead of a script (see the menu section above) |
+| `hidden` | optional; hides the command from `/menu` (submenu targets) |
 | `template` | optional; `${output}` = script output, `\n`/`\t` = newline/tab (caption for `--img` commands; plain commands only) |
 | `img` | optional; when true the script's output is a path to an image sent as a photo |
 | `timeout_sec` | optional, 1–300 (default 30) |
@@ -341,33 +387,6 @@ unknown `${name}` placeholder is a load-time error.
 
 An optional `.env` file is read for local convenience; real environment
 variables always win. For systemd, prefer `EnvironmentFile=`.
-
----
-
-## Example systemd unit
-
-```ini
-[Unit]
-Description=Telegram PC Remote bot
-After=network-online.target
-
-[Service]
-User=pcadmin
-WorkingDirectory=/opt/telegram-pc-remote
-EnvironmentFile=/etc/telegram-pc-remote.env
-ExecStart=/opt/telegram-pc-remote/bin/telegram-pc-remote
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`kill -HUP` reloads commands and the whitelist from disk.
-
----
 
 ## Project layout
 

@@ -390,3 +390,117 @@ func TestMenuRejectsMissingOptionScript(t *testing.T) {
 		t.Fatal("option referencing a missing script must be rejected")
 	}
 }
+
+const nestedMenuCommands = `{
+  "version": 2,
+  "commands": [
+    {"text": "Media", "menu": {
+      "id": "media",
+      "prompt": "Media actions:",
+      "options": [
+        {"label": "Volume", "menu_id": "volume"},
+        {"label": "Static", "script": "status.sh"}
+      ]
+    }},
+    {"text": "Volume Menu", "hidden": true, "menu": {
+      "id": "volume",
+      "prompt": "Volume:",
+      "script": "status.sh",
+      "options": [{"label": "+", "value": "+2"}, {"label": "-", "value": "-2"}]
+    }}
+  ]
+}`
+
+func TestLoadNestedMenuReference(t *testing.T) {
+	dir, root := setup(t, map[string]string{"status.sh": "echo up\n"})
+	p := writeCommands(t, dir, nestedMenuCommands)
+	s, err := New(p, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	media, ok := s.Lookup("Media")
+	if !ok || media.Menu == nil || len(media.Menu.Options) != 2 {
+		t.Fatalf("media menu not loaded: %+v", media)
+	}
+	if media.Menu.Options[0].MenuID != "volume" {
+		t.Fatalf("menu_id not loaded: %+v", media.Menu.Options[0])
+	}
+	// The referenced menu resolves both by its own id and its text.
+	if m, ok := s.LookupMenu("volume"); !ok || m.Text != "Volume Menu" || !m.Hidden {
+		t.Fatalf("referenced menu did not load: %+v %v", m, ok)
+	}
+}
+
+func TestNestedMenuReferenceMustExist(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	p := writeCommands(t, dir, `{
+	  "version": 2,
+	  "commands": [{"text": "M", "menu": {
+	    "id": "m", "script": "a.sh",
+	    "options": [{"label": "A", "menu_id": "ghost-menu"}]
+	  }}]
+	}`)
+	if _, err := New(p, root); err == nil {
+		t.Fatal("menu_id referencing an unknown menu must be rejected")
+	}
+}
+
+func TestNestedMenuOptionCannotCarryScriptOrValue(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	for _, extra := range []string{`"script": "a.sh"`, `"value": "x"`} {
+		p := writeCommands(t, dir, `{
+		  "version": 2,
+		  "commands": [
+		    {"text": "T", "menu": {"id": "t", "options": [{"label": "A", "script": "a.sh"}]}},
+		    {"text": "M", "menu": {"id": "m", "script": "a.sh",
+		      "options": [{"label": "A", "menu_id": "t", `+extra+`}]}}
+		  ]
+		}`)
+		if _, err := New(p, root); err == nil {
+			t.Fatalf("menu option combining menu_id with %s must be rejected", extra)
+		}
+	}
+}
+
+func TestMenuHandlerRuleExemptsNestedReferences(t *testing.T) {
+	// Menu "M" has no handler script: options must have their own script OR
+	// open another menu. Navigation options are exempt.
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	p := writeCommands(t, dir, `{
+	  "version": 2,
+	  "commands": [
+	    {"text": "Target", "hidden": true, "menu": {"id": "t", "script": "a.sh", "options": [{"label": "Go"}]}},
+	    {"text": "M", "menu": {"id": "m",
+	      "options": [{"label": "Nav", "menu_id": "t"}, {"label": "Run", "script": "a.sh"}]}}
+	  ]
+	}`)
+	if _, err := New(p, root); err != nil {
+		t.Fatalf("menu without handler but with nav+script options should load: %v", err)
+	}
+}
+
+func TestHiddenFlag(t *testing.T) {
+	dir, root := setup(t, map[string]string{"a.sh": "echo a\n"})
+	p := writeCommands(t, dir, `{
+	  "version": 2,
+	  "commands": [
+	    {"text": "Visible", "script": "a.sh"},
+	    {"text": "Stealth", "hidden": true, "menu": {"id": "s", "script": "a.sh", "options": [{"label": "A"}]}}
+	  ]
+	}`)
+	s, err := New(p, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vis := s.List()
+	if len(vis) != 2 {
+		t.Fatalf("List must include hidden commands (they are hidden from the keyboard, not from lookup): %d", len(vis))
+	}
+	if !vis[0].Hidden && !vis[1].Hidden {
+		t.Fatal("hidden flag not loaded")
+	}
+	byID, ok := s.LookupMenu("s")
+	if !ok || byID.Text != "Stealth" {
+		t.Fatalf("hidden menu must still be addressable: %v %v", byID, ok)
+	}
+}
