@@ -1,0 +1,5 @@
+{
+  "note": "Allowlist. Get your numeric user/chat IDs from a bot such as @userinfobot. BOTH lists are enforced: a message is processed only if its sender is in 'users' AND the chat is in 'chats'. The bot starts in deny-all mode until you add at least one entry to each. Edit this file and it is reloaded automatically (or send SIGHUP). IDs must be integers.",
+  "users": [],
+  "chats": []
+}

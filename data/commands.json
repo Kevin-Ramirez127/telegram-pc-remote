@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "commands": [
+    {
+      "text": "Hello",
+      "script": "hello.sh"
+    },
+    {
+      "text": "System Status",
+      "script": "status.sh"
+    },
+    {
+      "text": "System Report",
+      "script": "report.sh",
+      "template": "📊 System report:\\n${output}",
+      "timeout_sec": 20
+    }
+  ]
+}

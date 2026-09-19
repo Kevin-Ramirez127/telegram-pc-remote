@@ -201,6 +201,39 @@ just another menu command, usually `hidden: true`):
 | `options[].menu_id` | optional; pressing the option opens the referenced menu instead of running a script (no `script`/`value` allowed together) |
 | `hidden` | hides the command from the `/menu` keyboard — use it for submenu targets |
 
+### Starter example commands
+
+A fresh install starts with just the whitelist — no commands yet. These short
+example scripts live in the `commands/` directory and give you something to
+play with immediately. Copy-paste this whole block once; edit the scripts to
+match your desktop afterwards (`status.sh`, `report.sh` and `hello.sh` work
+everywhere; `screenshot.sh`/`workspace.sh` target Sway/Wayland, `lock.sh`
+uses `loginctl`):
+
+```bash
+./scripts/manage_commands.sh add "Hello" --script hello.sh
+./scripts/manage_commands.sh add "System Status" --script status.sh
+./scripts/manage_commands.sh add "System Report" --script report.sh \
+  --template '📊 System report:\n${output}' --timeout 20
+./scripts/manage_commands.sh add "Screenshot" --script screenshot.sh \
+  --img --template '📸 Screenshot taken' --timeout 30
+./scripts/manage_commands.sh add "Lock PC" --script lock.sh
+
+# a menu: one button -> 5 option buttons, all handled by workspace.sh
+./scripts/manage_commands.sh addmenu "Change Workspace" \
+  --prompt "Select Workspace:" --script workspace.sh --timeout 15
+for i in 1 2 3 4 5; do
+  ./scripts/manage_commands.sh addopt "Change Workspace" --label "$i"
+done
+```
+
+Press `/menu` on Telegram: the six buttons appear. Press `Change Workspace`
+to get the workspace options; after any script's reply the general menu is
+re-sent automatically. Replace the example `echo`s with real actions (e.g.
+`wmctrl -s "$1"`/`i3-msg workspace "$1"` in `workspace.sh`, your own lock
+command in `lock.sh`) whenever you like — scripts are read fresh on every
+press.
+
 ### Management script
 
 ```bash
