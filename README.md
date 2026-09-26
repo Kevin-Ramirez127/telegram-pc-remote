@@ -42,7 +42,9 @@ cp .env.example .env          # set TELEGRAM_BOT_TOKEN (from @BotFather) you got
 chmod 600 .env
 
 # 2. Whitelist yourself (numeric IDs — get them from @userinfobot)
-#    Edit data/whitelist.json and add your user ID and chat ID.
+#    telegram-remote config --adduser <your-id>   # allowlists user+chat (covers DMs)
+#    telegram-remote config --list                 # show the allowlist
+#    (for group chats with a different chat id: config --addchat <chat-id>)
 
 # 3. Author scripts and register buttons
 scripts/manage_commands.sh add "System Status" --script status.sh --timeout 15
@@ -420,6 +422,21 @@ unknown `${name}` placeholder is a load-time error.
 
 An optional `.env` file is read for local convenience; real environment
 variables always win. For systemd, prefer `EnvironmentFile=`.
+
+## Install (`./install.sh`)
+
+`./install.sh` builds the bot, asks for the Telegram token (unless
+`TELEGRAM_BOT_TOKEN` is exported or `--no-prompt` is given), and installs a
+self-contained copy — the repo checkout is not needed at runtime:
+
+```
+~/.local/bin/telegram-remote            the command: start|stop|restart|status|logs|reload|run|config
+~/.local/share/telegram-remote/         app root: bin/, scripts/, .env, data/, commands/, bot.log, .run/
+```
+
+Reinstalls refresh the binary and control script but never overwrite your
+`.env`, `data/*.json` or `commands/*.sh`. `make uninstall` removes the program
+and keeps that user state. `PREFIX=... ./install.sh` changes the prefix.
 
 ## Project layout
 
